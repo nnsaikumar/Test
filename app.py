@@ -4,11 +4,15 @@ from io import BytesIO, StringIO
 import openpyxl
 from openpyxl.styles import Alignment
 import numpy as np
+from functools import lru_cache
+import time
+
+# Set page config at the very top
+st.set_page_config(page_title="PTD vs SDS Comparison Tool", layout="wide")
 
 def parse_pasted_data(pasted_text):
     """Parse pasted Excel data (tab-separated) into DataFrame"""
     try:
-        # Try to parse as tab-separated (Excel default when copying)
         df = pd.read_csv(StringIO(pasted_text), sep='\t', engine='python')
         return df
     except Exception as e:
@@ -19,101 +23,155 @@ def parse_uploaded_file(uploaded_file, sheet_name='Form Definitions', is_ptd=Fal
     """Parse uploaded Excel file into DataFrame"""
     try:
         if is_ptd:
-            # For PTD files: Skip first row (index 0) and use second row as headers
             df = pd.read_excel(uploaded_file, sheet_name=sheet_name, engine='openpyxl', header=1)
         else:
-            # For SDS files: Use first row as headers (default)
             df = pd.read_excel(uploaded_file, sheet_name=sheet_name, engine='openpyxl')
         return df
     except ValueError as e:
-        st.error(f"Error: Sheet '{sheet_name}' not found in the uploaded file. Available sheets: {pd.ExcelFile(uploaded_file).sheet_names}")
+        st.error(f"Error: Sheet '{sheet_name}' not found. Available sheets: {pd.ExcelFile(uploaded_file).sheet_names}")
         return None
     except Exception as e:
-        st.error(f"Error reading uploaded file: {e}")
+        st.error(f"Error reading file: {e}")
         return None
 
+def convert_decimal_column(df):
+    """
+    Convert 'Decimal' column values to proper decimal format.
+    Examples: "1" -> "1.0", "2" -> "2.0", "1.0" -> "1.0"
+    """
+    if df is None:
+        return df
+    
+    # Find the Decimal column (handle various spacing)
+    decimal_column = None
+    for col in df.columns:
+        if col.strip().lower() == 'decimal':
+            decimal_column = col
+            break
+    
+    if decimal_column:
+        def format_decimal(value):
+            """Format a single decimal value"""
+            if pd.isna(value) or value == '' or value is None:
+                return value
+            
+            try:
+                # Convert to string first
+                str_value = str(value).strip()
+                
+                # If empty after strip, return as is
+                if not str_value:
+                    return value
+                
+                # Try to convert to float
+                float_value = float(str_value)
+                
+                # Check if it's a whole number
+                if float_value == int(float_value):
+                    # Return with .0
+                    return f"{int(float_value)}.0"
+                else:
+                    # Return as is (already has decimal)
+                    return str(float_value)
+            except (ValueError, TypeError):
+                # If conversion fails, return original value
+                return value
+        
+        # Apply formatting
+        df[decimal_column] = df[decimal_column].apply(format_decimal)
+    
+    return df
+
 def process_ptd_dataframe(df):
-    """Process PTD dataframe: remove specific columns and filter by 'Used in trial'"""
+    """
+    Process PTD dataframe: 
+    1. Filter by 'Used in trial' (Y, Yes, Mod)
+    2. Remove specific columns
+    3. Convert Decimal column format
+    """
     if df is None:
         return None
     
-    # Columns to remove from PTD
-    columns_to_remove = [
-        'Modification comments + Highlight Cells where change made',
-        'Library source'
-    ]
+    original_count = len(df)
     
-    # Remove columns if they exist
-    for col in columns_to_remove:
-        if col in df.columns:
-            df = df.drop(columns=[col])
-    
-    # Filter by "Used in trial (Y, N, Mod)" column
+    # Step 1: Filter by trial column (Y, Yes, Mod variations)
     trial_column_names = [
         'Used in trial (Y, N, Mod)',
-        'Used in trial (Y, N, Mod) ',  # with trailing space
+        'Used in trial (Y, N, Mod) ',
+        ' Used in trial (Y, N, Mod)',
+        ' Used in trial (Y, N, Mod) ',
         'Used in trial',
     ]
     
-    trial_column = None
-    for col_name in trial_column_names:
-        if col_name in df.columns:
-            trial_column = col_name
-            break
+    trial_column = next((col for col in trial_column_names if col in df.columns), None)
     
     if trial_column:
-        # Filter to only keep rows where the value is 'Y'
-        original_count = len(df)
-        df = df[df[trial_column].astype(str).str.strip().str.upper() == 'Y'].copy()
+        # Transform once, then filter for Y, Yes, or Mod
+        normalized_column = df[trial_column].astype(str).str.strip().str.upper()
+        df = df[normalized_column.isin(['Y', 'YES', 'MOD'])].copy()
         filtered_count = len(df)
-        return df, original_count, filtered_count
     else:
-        # If column not found, return dataframe as is
-        st.warning("⚠️ Column 'Used in trial (Y, N, Mod)' not found in PTD data. Skipping filter.")
-        return df, len(df), len(df)
-
-def find_matching_rows(source_df, target_df, item_name):
-    """
-    Find matching rows based on Item Name, Item Group Label, or Form Label - Optimized version
-    """
-    # First try to match by Item Name (most common case)
-    source_row = source_df[source_df['Item Name'] == item_name]
-    target_row = target_df[target_df['Item Name'] == item_name]
+        st.warning("⚠️ Column 'Used in trial (Y, N, Mod)' not found. Skipping filter.")
+        filtered_count = original_count
     
-    if not source_row.empty or not target_row.empty:
+    # Step 2: Remove specific columns (handles various spacing)
+    columns_to_remove_patterns = [
+        'Modification comments + Highlight Cells where change made',
+        'Library source',
+        'Used in trial (Y, N, Mod)'
+    ]
+    
+    columns_to_remove = []
+    for col in df.columns:
+        col_stripped = col.strip()
+        if col_stripped in columns_to_remove_patterns:
+            columns_to_remove.append(col)
+    
+    df = df.drop(columns=columns_to_remove, errors='ignore')
+    
+    # Step 3: Convert Decimal column format
+    df = convert_decimal_column(df)
+    
+    return df, original_count, filtered_count
+
+def process_sds_dataframe(df):
+    """
+    Process SDS dataframe:
+    Convert Decimal column format only
+    """
+    if df is None:
+        return df
+    
+    # Convert Decimal column format
+    df = convert_decimal_column(df)
+    
+    return df
+
+def find_matching_rows_optimized(source_df, target_df, item_name, source_dict, target_dict):
+    """
+    Optimized matching using pre-built dictionaries
+    """
+    # Try Item Name first
+    source_row = source_dict.get(item_name)
+    target_row = target_dict.get(item_name)
+    
+    if source_row is not None or target_row is not None:
         return source_row, target_row, 'Item Name'
     
-    # If Item Name not found, try Item Group Label
-    if not source_row.empty:
-        ig_label = source_row['Item Group Label'].values[0]
-        target_row = target_df[target_df['Item Group Label'] == ig_label]
-        if not target_row.empty:
-            return source_row, target_row, 'Item Group Label'
-    
-    if not target_row.empty:
-        ig_label = target_row['Item Group Label'].values[0]
-        source_row = source_df[source_df['Item Group Label'] == ig_label]
-        if not source_row.empty:
-            return source_row, target_row, 'Item Group Label'
-    
-    # If still not found, try Form Label
-    if not source_row.empty:
-        form_label = source_row['Form Label'].values[0]
-        target_row = target_df[target_df['Form Label'] == form_label]
-        if not target_row.empty:
-            return source_row, target_row, 'Form Label'
-    
-    if not target_row.empty:
-        form_label = target_row['Form Label'].values[0]
-        source_row = source_df[source_df['Form Label'] == form_label]
-        if not source_row.empty:
-            return source_row, target_row, 'Form Label'
-    
-    return source_row, target_row, None
+    return None, None, None
 
-def compare_values_vectorized(val1, val2):
-    """Optimized compare two values and return status"""
-    # Handle NaN values
+def build_lookup_dictionaries(df):
+    """Build lookup dictionaries for faster access"""
+    item_dict = {}
+    for idx, row in df.iterrows():
+        item_name = row.get('Item Name')
+        if pd.notna(item_name):
+            item_dict[item_name] = row
+    return item_dict
+
+@st.cache_data
+def compare_values_cached(val1, val2):
+    """Cached comparison function"""
     val1_nan = pd.isna(val1)
     val2_nan = pd.isna(val2)
     
@@ -124,7 +182,6 @@ def compare_values_vectorized(val1, val2):
     if not val1_nan and val2_nan:
         return 'missing_target', '⚠', 'Missing in Target'
     
-    # Convert to string for comparison
     str1 = str(val1).strip()
     str2 = str(val2).strip()
     
@@ -133,44 +190,32 @@ def compare_values_vectorized(val1, val2):
     else:
         return 'mismatch', '✗', 'Values differ'
 
-def create_comparison_dataframe(source_row, target_row, source_df, source_name, target_name):
-    """Create a comparison dataframe for display - only source columns - Optimized"""
-    # Columns to ignore from comparison
-    IGNORE_COLUMNS = ['Definition Last Modified', 'Relationship Last Modified']
+def create_comparison_dataframe_fast(source_row, target_row, source_columns, source_name, target_name):
+    """Vectorized comparison creation"""
+    IGNORE_COLUMNS = {'Definition Last Modified', 'Relationship Last Modified'}
     
-    # Get only source columns
-    source_columns = [col for col in source_df.columns if col not in IGNORE_COLUMNS]
-    
-    # Pre-allocate lists for better performance
     comparison_data = []
     
-    # Get source and target values in bulk
-    if not source_row.empty:
-        source_values = source_row.iloc[0]
-    else:
+    if source_row is None:
         source_values = pd.Series([None] * len(source_columns), index=source_columns)
-    
-    if not target_row.empty and len(target_row) > 0:
-        target_values = target_row.iloc[0]
     else:
+        source_values = source_row
+    
+    if target_row is None:
         target_values = pd.Series([None] * len(source_columns), index=source_columns)
+    else:
+        target_values = target_row
     
     for col in source_columns:
+        if col in IGNORE_COLUMNS:
+            continue
+            
         source_value = source_values.get(col)
+        target_value = target_values.get(col) if col in target_values.index else None
         
-        # Get target value if column exists in target
-        if col in target_values.index:
-            target_value = target_values.get(col)
-        else:
-            target_value = None
+        status, symbol, note = compare_values_cached(source_value, target_value)
         
-        status, symbol, note = compare_values_vectorized(source_value, target_value)
-        
-        # Replace generic terms with actual names
-        if 'Source' in note:
-            note = note.replace('Source', source_name)
-        if 'Target' in note:
-            note = note.replace('Target', target_name)
+        note = note.replace('Source', source_name).replace('Target', target_name)
         
         comparison_data.append({
             'Column Name': col,
@@ -185,153 +230,125 @@ def create_comparison_dataframe(source_row, target_row, source_df, source_name, 
 
 def highlight_differences(row):
     """Apply styling to highlight differences"""
-    if row['Match'] == 'match':
-        return ['background-color: #90EE90'] * len(row)  # Light green
-    elif row['Match'] == 'mismatch':
-        return ['background-color: #FFB6C1'] * len(row)  # Light red
-    elif 'missing' in str(row['Match']):
-        return ['background-color: #FFE4B5'] * len(row)  # Light orange
+    match_type = row['Match']
+    if match_type == 'match':
+        return ['background-color: #90EE90'] * len(row)
+    elif match_type == 'mismatch':
+        return ['background-color: #FFB6C1'] * len(row)
+    elif 'missing' in match_type:
+        return ['background-color: #FFE4B5'] * len(row)
     else:
         return [''] * len(row)
 
-def create_comprehensive_report(all_comparisons, source_name, target_name, source_df):
-    """Create a comprehensive Excel report with summary and issue-only details - Optimized"""
+def create_comprehensive_report_fast(all_comparisons, source_name, target_name, source_df):
+    """Optimized report generation"""
     output = BytesIO()
     
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Sheet 1: Comparison Summary - Build all data at once
-        summary_data = []
-        for item_name, data in all_comparisons.items():
-            comp_df = data['comparison_df']
-            
-            # Vectorized counting
-            match_mask = comp_df['Match'] == 'match'
-            mismatch_mask = comp_df['Match'] == 'mismatch'
-            missing_target_mask = comp_df['Match'] == 'missing_target'
-            missing_source_mask = comp_df['Match'] == 'missing_source'
-            
-            total_cols = len(comp_df)
-            matches = match_mask.sum()
-            mismatches = mismatch_mask.sum()
-            missing_target = missing_target_mask.sum()
-            missing_source = missing_source_mask.sum()
-            match_percentage = (matches / total_cols * 100) if total_cols > 0 else 0
-            
-            summary_data.append({
-                'Item Name': item_name,
-                'Match Type': data['match_type'],
-                f'In {source_name}': '✓' if data['source_exists'] else '✗',
-                f'In {target_name}': '✓' if data['target_exists'] else '✗',
-                'Total Columns': total_cols,
-                'Matches': matches,
-                'Mismatches': mismatches,
-                f'Missing in {target_name}': missing_target,
-                f'Missing in {source_name}': missing_source,
-                'Match %': f"{match_percentage:.1f}%"
-            })
+    # Pre-build summary data
+    summary_data = []
+    issues_data = []
+    
+    # Pre-fetch source info for all items
+    source_info_cache = {}
+    for item_name in all_comparisons.keys():
+        source_row = source_df[source_df['Item Name'] == item_name]
+        if not source_row.empty:
+            row = source_row.iloc[0]
+            source_info_cache[item_name] = {
+                'form_name': row.get('Form Name', ''),
+                'form_label': row.get('Form Label', ''),
+                'form_short_label': row.get('Form Short Label', ''),
+                'item_group_name': row.get('Item Group Name', ''),
+                'item_group_label': row.get('Item Group Label', '')
+            }
+    
+    # Build summary and issues in one pass
+    for item_name, data in all_comparisons.items():
+        comp_df = data['comparison_df']
         
+        match_counts = comp_df['Match'].value_counts()
+        total_cols = len(comp_df)
+        matches = match_counts.get('match', 0)
+        mismatches = match_counts.get('mismatch', 0)
+        missing_target = match_counts.get('missing_target', 0)
+        missing_source = match_counts.get('missing_source', 0)
+        match_percentage = (matches / total_cols * 100) if total_cols > 0 else 0
+        
+        summary_data.append({
+            'Item Name': item_name,
+            'Match Type': data['match_type'],
+            f'In {source_name}': '✓' if data['source_exists'] else '✗',
+            f'In {target_name}': '✓' if data['target_exists'] else '✗',
+            'Total Columns': total_cols,
+            'Matches': matches,
+            'Mismatches': mismatches,
+            f'Missing in {target_name}': missing_target,
+            f'Missing in {source_name}': missing_source,
+            'Match %': f"{match_percentage:.1f}%"
+        })
+        
+        # Only process issues if not 100% match
+        if match_percentage < 100.0:
+            info = source_info_cache.get(item_name, {})
+            
+            # Filter non-matching rows
+            issue_rows = comp_df[comp_df['Match'] != 'match']
+            
+            for _, row in issue_rows.iterrows():
+                column_name = row['Column Name']
+                source_value = row[f'{source_name} Value']
+                target_value = row[f'{target_name} Value']
+                
+                if row['Match'] == 'mismatch':
+                    issue_type = f"{column_name}: Value mismatch ({source_name}: '{source_value}' vs {target_name}: '{target_value}')"
+                elif row['Match'] == 'missing_target':
+                    issue_type = f"{column_name}: Missing in {target_name} ({source_name} has: '{source_value}')"
+                elif row['Match'] == 'missing_source':
+                    issue_type = f"{column_name}: Missing in {source_name} ({target_name} has: '{target_value}')"
+                else:
+                    issue_type = f"{column_name}: {row['Note']}"
+                
+                issues_data.append({
+                    'Item Name': item_name,
+                    'Form Name': info.get('form_name', ''),
+                    'Form Label': info.get('form_label', ''),
+                    'Form Short Label': info.get('form_short_label', ''),
+                    'Item Group Name': info.get('item_group_name', ''),
+                    'Item Group Label': info.get('item_group_label', ''),
+                    'Issue Type': issue_type
+                })
+    
+    # Write to Excel
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Summary sheet
         summary_df = pd.DataFrame(summary_data)
         summary_df.to_excel(writer, sheet_name='Comparison Summary', index=False)
         
-        # Sheet 2: Issues Only (simplified format) - Optimized
-        issues_data = []
-        
-        # Pre-fetch source rows for all items to avoid repeated lookups
-        source_info_cache = {}
-        for item_name in all_comparisons.keys():
-            source_row = source_df[source_df['Item Name'] == item_name]
-            if not source_row.empty:
-                source_info_cache[item_name] = {
-                    'form_name': source_row['Form Name'].values[0] if 'Form Name' in source_row.columns else '',
-                    'form_label': source_row['Form Label'].values[0] if 'Form Label' in source_row.columns else '',
-                    'form_short_label': source_row['Form Short Label'].values[0] if 'Form Short Label' in source_row.columns else '',
-                    'item_group_name': source_row['Item Group Name'].values[0] if 'Item Group Name' in source_row.columns else '',
-                    'item_group_label': source_row['Item Group Label'].values[0] if 'Item Group Label' in source_row.columns else ''
-                }
-        
-        for item_name, data in all_comparisons.items():
-            comp_df = data['comparison_df']
-            matches = (comp_df['Match'] == 'match').sum()
-            match_rate = (matches / len(comp_df) * 100) if len(comp_df) > 0 else 0
-            
-            # Only include items with less than 100% match
-            if match_rate < 100.0:
-                # Get cached source info
-                if item_name in source_info_cache:
-                    info = source_info_cache[item_name]
-                    form_name = info['form_name']
-                    form_label = info['form_label']
-                    form_short_label = info['form_short_label']
-                    item_group_name = info['item_group_name']
-                    item_group_label = info['item_group_label']
-                else:
-                    form_name = ''
-                    form_label = ''
-                    form_short_label = ''
-                    item_group_name = ''
-                    item_group_label = ''
-                
-                # Find all rows with issues (not 100% match) - vectorized
-                issue_rows = comp_df[comp_df['Match'] != 'match']
-                
-                for _, row in issue_rows.iterrows():
-                    column_name = row['Column Name']
-                    source_value = row[f'{source_name} Value']
-                    target_value = row[f'{target_name} Value']
-                    
-                    # Determine issue type
-                    if row['Match'] == 'mismatch':
-                        issue_type = f"{column_name}: Value mismatch ({source_name}: '{source_value}' vs {target_name}: '{target_value}')"
-                    elif row['Match'] == 'missing_target':
-                        issue_type = f"{column_name}: Missing in {target_name} ({source_name} has: '{source_value}')"
-                    elif row['Match'] == 'missing_source':
-                        issue_type = f"{column_name}: Missing in {source_name} ({target_name} has: '{target_value}')"
-                    else:
-                        issue_type = f"{column_name}: {row['Note']}"
-                    
-                    issues_data.append({
-                        'Item Name': item_name,
-                        'Form Name': form_name,
-                        'Form Label': form_label,
-                        'Form Short Label': form_short_label,
-                        'Item Group Name': item_group_name,
-                        'Item Group Label': item_group_label,
-                        'Issue Type': issue_type
-                    })
-        
+        # Issues sheet
         if issues_data:
             issues_df = pd.DataFrame(issues_data)
             issues_df.to_excel(writer, sheet_name='Issues Only', index=False)
             
-            # Access the workbook and worksheet to format
             workbook = writer.book
             worksheet = workbook['Issues Only']
             
-            # Set text wrapping to False and alignment for all cells
-            for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, 
-                                          min_col=1, max_col=worksheet.max_column):
+            for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row):
                 for cell in row:
                     cell.alignment = Alignment(wrap_text=False, vertical='top', horizontal='left')
             
-            # Auto-adjust column widths
             for column in worksheet.columns:
                 max_length = 0
                 column_letter = column[0].column_letter
                 for cell in column:
                     try:
                         if cell.value:
-                            cell_length = len(str(cell.value))
-                            if cell_length > max_length:
-                                max_length = cell_length
+                            max_length = max(max_length, len(str(cell.value)))
                     except:
                         pass
-                adjusted_width = min(max_length + 2, 80)  # Cap at 80 characters for Issue Type
+                adjusted_width = min(max_length + 2, 80)
                 worksheet.column_dimensions[column_letter].width = adjusted_width
         else:
-            # If all items have 100% match, create an empty sheet with a message
-            empty_df = pd.DataFrame({
-                'Message': ['All items have 100% match rate. No discrepancies to report.']
-            })
+            empty_df = pd.DataFrame({'Message': ['All items have 100% match rate.']})
             empty_df.to_excel(writer, sheet_name='Issues Only', index=False)
     
     output.seek(0)
@@ -343,8 +360,6 @@ def get_unique_items(df, column_name='Item Name'):
     return set(df[column_name].dropna().unique())
 
 def main():
-    st.set_page_config(page_title="PTD vs SDS Comparison Tool", layout="wide")
-    
     st.title("📊 PTD vs SDS Comparison Tool")
     
     # Initialize session state
@@ -362,6 +377,14 @@ def main():
         st.session_state.comparison_complete = False
     if 'input_method' not in st.session_state:
         st.session_state.input_method = "📋 Copy-Paste from Excel"
+    # Session state for pasted text (stores raw text)
+    if 'left_pasted_text' not in st.session_state:
+        st.session_state.left_pasted_text = ""
+    if 'right_pasted_text' not in st.session_state:
+        st.session_state.right_pasted_text = ""
+    # Flag to track if swap just happened
+    if 'swap_triggered' not in st.session_state:
+        st.session_state.swap_triggered = False
     
     # Input method selection
     st.markdown("---")
@@ -369,8 +392,7 @@ def main():
     input_method = st.radio(
         "How would you like to provide the data?",
         ["📋 Copy-Paste from Excel", "📁 Upload Excel Files"],
-        horizontal=True,
-        help="Choose whether to copy-paste data directly or upload Excel files"
+        horizontal=True
     )
     st.session_state.input_method = input_method
     
@@ -381,44 +403,74 @@ def main():
         [
             "PTD → SDS (Compare PTD columns against SDS)",
             "SDS → PTD (Compare SDS columns against PTD)",
-            "SDS → SDS (Compare SDS columns against SDS)"
+            "Parental SDS → Child SDS (Compare Parental SDS columns against Child SDS)",
+            "Parental PTD → Child PTD (Compare Parental PTD columns against Child PTD)"
         ],
         index=["PTD → SDS (Compare PTD columns against SDS)",
                "SDS → PTD (Compare SDS columns against PTD)",
-               "SDS → SDS (Compare SDS columns against SDS)"].index(st.session_state.comparison_direction),
-        help="Choose which file's columns to use as the basis for comparison"
+               "Parental SDS → Child SDS (Compare Parental SDS columns against Child SDS)",
+               "Parental PTD → Child PTD (Compare Parental PTD columns against Child PTD)"].index(st.session_state.comparison_direction)
     )
     
-    # Update session state
     st.session_state.comparison_direction = comparison_direction
     
-    # Determine labels based on comparison direction
-    if "SDS → SDS" in comparison_direction:
-        left_label = "SDS1"
-        right_label = "SDS2"
-        left_key = "sds1"
-        right_key = "sds2"
+    # Determine labels
+    if "Parental SDS → Child SDS" in comparison_direction:
+        left_label, right_label = "Parental SDS", "Child SDS"
+        left_key, right_key = "parental_sds", "child_sds"
+        is_left_ptd, is_right_ptd = False, False
+    elif "Parental PTD → Child PTD" in comparison_direction:
+        left_label, right_label = "Parental PTD", "Child PTD"
+        left_key, right_key = "parental_ptd", "child_ptd"
+        is_left_ptd, is_right_ptd = True, True
     else:
-        left_label = "PTD"
-        right_label = "SDS"
-        left_key = "ptd"
-        right_key = "sds"
+        left_label, right_label = "PTD", "SDS"
+        left_key, right_key = "ptd", "sds"
+        is_left_ptd = (left_label == "PTD")
+        is_right_ptd = (right_label == "PTD")
     
     st.markdown("---")
     
-    # Data input section based on selected method
+    # Data input section
     if input_method == "📋 Copy-Paste from Excel":
         st.markdown("#### 📋 How to Copy from Excel:")
         col1, col2, col3 = st.columns(3)
         with col1:
             st.markdown("**1️⃣ Select Data**")
-            st.caption("Select all rows including headers in Excel")
+            st.caption("Select all rows including headers")
         with col2:
             st.markdown("**2️⃣ Copy**")
-            st.caption("Press Ctrl+C (Windows)")
+            st.caption("Press Ctrl+C")
         with col3:
             st.markdown("**3️⃣ Paste**")
             st.caption("Click in text area and press Ctrl+V")
+        
+        st.markdown("---")
+        
+        # Show warning for PTD files
+        if is_left_ptd or is_right_ptd:
+            st.warning("⚠️ **For PTD files:** Ensure you copy from row 2 onwards (headers in row 2, data from row 3). Row 1 will be ignored during processing.")
+        
+        # Show info about filtering
+        st.info("ℹ️ **Automatic Processing:**\n"
+                "- PTD data filtered for Y/Yes/Mod in 'Used in trial' column\n"
+                "- 'Modification comments' and 'Used in trial' columns removed\n"
+                "- 'Decimal' column formatted (e.g., 1 → 1.0)")
+        
+        # Swap button with instant swap
+        col_swap = st.columns([1, 2, 1])
+        with col_swap[1]:
+            if st.button("🔄 Swap Left ↔ Right", use_container_width=True, type="secondary", key="swap_btn"):
+                # Swap text content instantly
+                st.session_state.left_pasted_text, st.session_state.right_pasted_text = \
+                    st.session_state.right_pasted_text, st.session_state.left_pasted_text
+                
+                # Swap already parsed dataframes (instant swap!)
+                st.session_state.ptd_df, st.session_state.sds_df = \
+                    st.session_state.sds_df, st.session_state.ptd_df
+                
+                # Set swap flag
+                st.session_state.swap_triggered = True
         
         st.markdown("---")
         
@@ -426,74 +478,98 @@ def main():
         
         with col1:
             st.subheader(f"📄 {left_label} Data")
-            st.caption("Copy data from Excel and paste here")
             left_text = st.text_area(
                 f"Paste {left_label} data here:",
                 height=300,
-                placeholder=f"Select and copy your {left_label} data from Excel, then paste here...",
+                placeholder=f"Paste {left_label} data here...",
                 key=f"{left_key}_paste",
-                help=f"Select all {left_label} data in Excel (including headers), copy (Ctrl+C), and paste here (Ctrl+V)"
+                value=st.session_state.left_pasted_text
             )
             
-            if left_text:
-                with st.spinner(f"Parsing {left_label} data..."):
-                    left_df = parse_pasted_data(left_text)
-                    if left_df is not None:
-                        # Process PTD dataframe if it's PTD (but not SDS1)
-                        if left_label == "PTD":
-                            processed_result = process_ptd_dataframe(left_df)
-                            if isinstance(processed_result, tuple):
-                                left_df, original_count, filtered_count = processed_result
+            # Only parse if text changed and not from swap
+            if left_text != st.session_state.left_pasted_text:
+                st.session_state.left_pasted_text = left_text
+                st.session_state.swap_triggered = False
+                
+                if left_text:
+                    with st.spinner(f"Parsing {left_label} data..."):
+                        left_df = parse_pasted_data(left_text)
+                        if left_df is not None:
+                            if is_left_ptd:
+                                processed_result = process_ptd_dataframe(left_df)
+                                if isinstance(processed_result, tuple):
+                                    left_df, original_count, filtered_count = processed_result
+                                    st.session_state.ptd_df = left_df
+                                    st.success(f"✅ {left_label} data loaded: {len(left_df)} rows, {len(left_df.columns)} columns")
+                                    if original_count != filtered_count:
+                                        st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (Y/Yes/Mod only)")
+                            else:
+                                # Process SDS for decimal conversion
+                                left_df = process_sds_dataframe(left_df)
                                 st.session_state.ptd_df = left_df
                                 st.success(f"✅ {left_label} data loaded: {len(left_df)} rows, {len(left_df.columns)} columns")
-                                if original_count != filtered_count:
-                                    st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (keeping only 'Y' in 'Used in trial' column)")
-                            else:
-                                st.session_state.ptd_df = processed_result
-                        else:
-                            st.session_state.ptd_df = left_df
-                            st.success(f"✅ {left_label} data loaded: {len(left_df)} rows, {len(left_df.columns)} columns")
-            elif st.session_state.ptd_df is not None:
-                st.success(f"✅ {left_label} data loaded: {len(st.session_state.ptd_df)} rows, {len(st.session_state.ptd_df.columns)} columns")
+                else:
+                    st.session_state.ptd_df = None
+            elif st.session_state.ptd_df is not None and left_text:
+                st.success(f"✅ {left_label} data loaded: {len(st.session_state.ptd_df)} rows")
         
         with col2:
             st.subheader(f"📄 {right_label} Data")
-            st.caption("Copy data from Excel and paste here")
             right_text = st.text_area(
                 f"Paste {right_label} data here:",
                 height=300,
-                placeholder=f"Select and copy your {right_label} data from Excel, then paste here...",
+                placeholder=f"Paste {right_label} data here...",
                 key=f"{right_key}_paste",
-                help=f"Select all {right_label} data in Excel (including headers), copy (Ctrl+C), and paste here (Ctrl+V)"
+                value=st.session_state.right_pasted_text
             )
             
-            if right_text:
-                with st.spinner(f"Parsing {right_label} data..."):
-                    right_df = parse_pasted_data(right_text)
-                    if right_df is not None:
-                        # Process PTD dataframe only if it's actual PTD (in SDS → PTD comparison)
-                        # For SDS2, don't process as PTD
-                        if right_label == "PTD":
-                            processed_result = process_ptd_dataframe(right_df)
-                            if isinstance(processed_result, tuple):
-                                right_df, original_count, filtered_count = processed_result
+            # Only parse if text changed and not from swap
+            if right_text != st.session_state.right_pasted_text:
+                st.session_state.right_pasted_text = right_text
+                st.session_state.swap_triggered = False
+                
+                if right_text:
+                    with st.spinner(f"Parsing {right_label} data..."):
+                        right_df = parse_pasted_data(right_text)
+                        if right_df is not None:
+                            if is_right_ptd:
+                                processed_result = process_ptd_dataframe(right_df)
+                                if isinstance(processed_result, tuple):
+                                    right_df, original_count, filtered_count = processed_result
+                                    st.session_state.sds_df = right_df
+                                    st.success(f"✅ {right_label} data loaded: {len(right_df)} rows, {len(right_df.columns)} columns")
+                                    if original_count != filtered_count:
+                                        st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (Y/Yes/Mod only)")
+                            else:
+                                # Process SDS for decimal conversion
+                                right_df = process_sds_dataframe(right_df)
                                 st.session_state.sds_df = right_df
                                 st.success(f"✅ {right_label} data loaded: {len(right_df)} rows, {len(right_df.columns)} columns")
-                                if original_count != filtered_count:
-                                    st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (keeping only 'Y' in 'Used in trial' column)")
-                            else:
-                                st.session_state.sds_df = processed_result
-                        else:
-                            st.session_state.sds_df = right_df
-                            st.success(f"✅ {right_label} data loaded: {len(right_df)} rows, {len(right_df.columns)} columns")
-            elif st.session_state.sds_df is not None:
-                st.success(f"✅ {right_label} data loaded: {len(st.session_state.sds_df)} rows, {len(st.session_state.sds_df.columns)} columns")
+                else:
+                    st.session_state.sds_df = None
+            elif st.session_state.sds_df is not None and right_text:
+                st.success(f"✅ {right_label} data loaded: {len(st.session_state.sds_df)} rows")
+        
+        # Reset swap flag after processing
+        if st.session_state.swap_triggered:
+            st.session_state.swap_triggered = False
     
-    else:  # Upload Excel Files
+    else:  # Upload files
         st.markdown("#### 📁 Upload Excel Files:")
-        st.info("ℹ️ **Note:** The tool will read data from the '**Form Definitions**' sheet in each uploaded file.")
-        if left_label == "PTD":
-            st.warning("⚠️ **For PTD files:** First row will be skipped and second row will be used as column headers.")
+        st.info("ℹ️ Data will be read from '**Form Definitions**' sheet.")
+        
+        # Show warning based on file types
+        if is_left_ptd and is_right_ptd:
+            st.warning("⚠️ **For both PTD files:** First row skipped, second row as headers. Data filtered for Y/Yes/Mod only.")
+        elif is_left_ptd:
+            st.warning(f"⚠️ **For {left_label} file:** First row skipped, second row as headers. Data filtered for Y/Yes/Mod only.")
+        elif is_right_ptd:
+            st.warning(f"⚠️ **For {right_label} file:** First row skipped, second row as headers. Data filtered for Y/Yes/Mod only.")
+        
+        st.info("ℹ️ **Automatic Processing:**\n"
+                "- PTD data filtered for Y/Yes/Mod in 'Used in trial' column\n"
+                "- 'Modification comments' and 'Used in trial' columns removed\n"
+                "- 'Decimal' column formatted (e.g., 1 → 1.0)")
         
         st.markdown("---")
         
@@ -501,110 +577,86 @@ def main():
         
         with col1:
             st.subheader(f"📄 {left_label} File")
-            st.caption("Upload Excel file (.xlsx or .xls)")
             left_file = st.file_uploader(
                 f"Upload {left_label} Excel file:",
                 type=['xlsx', 'xls'],
-                key=f"{left_key}_upload",
-                help=f"Select your {left_label} Excel file to upload. Data will be read from 'Form Definitions' sheet."
+                key=f"{left_key}_upload"
             )
             
             if left_file is not None:
-                # Determine if this is a PTD file (only actual PTD, not SDS1)
-                is_ptd_file = (left_label == "PTD")
-                
-                with st.spinner(f"Reading {left_label} file from 'Form Definitions' sheet..."):
-                    left_df = parse_uploaded_file(left_file, sheet_name='Form Definitions', is_ptd=is_ptd_file)
+                with st.spinner(f"Reading {left_label} file..."):
+                    left_df = parse_uploaded_file(left_file, sheet_name='Form Definitions', is_ptd=is_left_ptd)
                     if left_df is not None:
-                        # Process PTD dataframe only if it's actual PTD
-                        if is_ptd_file:
+                        if is_left_ptd:
                             processed_result = process_ptd_dataframe(left_df)
                             if isinstance(processed_result, tuple):
                                 left_df, original_count, filtered_count = processed_result
                                 st.session_state.ptd_df = left_df
-                                st.success(f"✅ {left_label} data loaded from 'Form Definitions' sheet (first row skipped): {len(left_df)} rows, {len(left_df.columns)} columns")
+                                st.success(f"✅ {left_label} loaded: {len(left_df)} rows")
                                 if original_count != filtered_count:
-                                    st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (keeping only 'Y' in 'Used in trial' column)")
-                            else:
-                                st.session_state.ptd_df = processed_result
-                                st.success(f"✅ {left_label} data loaded from 'Form Definitions' sheet (first row skipped): {len(processed_result)} rows, {len(processed_result.columns)} columns")
+                                    st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (Y/Yes/Mod only)")
                         else:
-                            # For SDS1, don't skip row and don't process as PTD
+                            # Process SDS for decimal conversion
+                            left_df = process_sds_dataframe(left_df)
                             st.session_state.ptd_df = left_df
-                            st.success(f"✅ {left_label} data loaded from 'Form Definitions' sheet: {len(left_df)} rows, {len(left_df.columns)} columns")
-                    else:
-                        st.session_state.ptd_df = None
+                            st.success(f"✅ {left_label} loaded: {len(left_df)} rows")
             elif st.session_state.ptd_df is not None:
-                st.success(f"✅ {left_label} data loaded: {len(st.session_state.ptd_df)} rows, {len(st.session_state.ptd_df.columns)} columns")
+                st.success(f"✅ {left_label} data loaded")
         
         with col2:
             st.subheader(f"📄 {right_label} File")
-            st.caption("Upload Excel file (.xlsx or .xls)")
             right_file = st.file_uploader(
                 f"Upload {right_label} Excel file:",
                 type=['xlsx', 'xls'],
-                key=f"{right_key}_upload",
-                help=f"Select your {right_label} Excel file to upload. Data will be read from 'Form Definitions' sheet."
+                key=f"{right_key}_upload"
             )
             
             if right_file is not None:
-                # Only PTD (in SDS→PTD) should skip first row, not SDS2
-                is_ptd_file = (right_label == "PTD")
-                
-                with st.spinner(f"Reading {right_label} file from 'Form Definitions' sheet..."):
-                    right_df = parse_uploaded_file(right_file, sheet_name='Form Definitions', is_ptd=is_ptd_file)
+                with st.spinner(f"Reading {right_label} file..."):
+                    right_df = parse_uploaded_file(right_file, sheet_name='Form Definitions', is_ptd=is_right_ptd)
                     if right_df is not None:
-                        # Process PTD dataframe only for actual PTD, not SDS2
-                        if is_ptd_file:
+                        if is_right_ptd:
                             processed_result = process_ptd_dataframe(right_df)
                             if isinstance(processed_result, tuple):
                                 right_df, original_count, filtered_count = processed_result
                                 st.session_state.sds_df = right_df
-                                st.success(f"✅ {right_label} data loaded from 'Form Definitions' sheet (first row skipped): {len(right_df)} rows, {len(right_df.columns)} columns")
+                                st.success(f"✅ {right_label} loaded: {len(right_df)} rows")
                                 if original_count != filtered_count:
-                                    st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (keeping only 'Y' in 'Used in trial' column)")
-                            else:
-                                st.session_state.sds_df = processed_result
-                                st.success(f"✅ {right_label} data loaded from 'Form Definitions' sheet (first row skipped): {len(processed_result)} rows, {len(processed_result.columns)} columns")
+                                    st.info(f"ℹ️ Filtered from {original_count} to {filtered_count} rows (Y/Yes/Mod only)")
                         else:
-                            # For regular SDS (including SDS2), don't skip row
+                            # Process SDS for decimal conversion
+                            right_df = process_sds_dataframe(right_df)
                             st.session_state.sds_df = right_df
-                            st.success(f"✅ {right_label} data loaded from 'Form Definitions' sheet: {len(right_df)} rows, {len(right_df.columns)} columns")
-                    else:
-                        st.session_state.sds_df = None
+                            st.success(f"✅ {right_label} loaded: {len(right_df)} rows")
             elif st.session_state.sds_df is not None:
-                st.success(f"✅ {right_label} data loaded: {len(st.session_state.sds_df)} rows, {len(st.session_state.sds_df.columns)} columns")
+                st.success(f"✅ {right_label} data loaded")
     
     # Use data from session state
     ptd_df = st.session_state.ptd_df
     sds_df = st.session_state.sds_df
     
-    # Check which data is available
     has_left = ptd_df is not None
     has_right = sds_df is not None
     
     if has_left and has_right:
         st.markdown("---")
-        st.success("✅ Both datasets loaded successfully! Ready to compare.")
+        st.success("✅ Both datasets loaded! Ready to compare.")
         
-        # Set source and target based on selection
+        # Set source and target
         if "PTD → SDS" in comparison_direction:
-            source_df = ptd_df
-            target_df = sds_df
-            source_name = "PTD"
-            target_name = "SDS"
+            source_df, target_df = ptd_df, sds_df
+            source_name, target_name = "PTD", "SDS"
         elif "SDS → PTD" in comparison_direction:
-            source_df = sds_df
-            target_df = ptd_df
-            source_name = "SDS"
-            target_name = "PTD"
-        elif "SDS → SDS" in comparison_direction:
-            source_df = ptd_df  # SDS1
-            target_df = sds_df  # SDS2
-            source_name = "SDS1"
-            target_name = "SDS2"
+            source_df, target_df = sds_df, ptd_df
+            source_name, target_name = "SDS", "PTD"
+        elif "Parental SDS → Child SDS" in comparison_direction:
+            source_df, target_df = ptd_df, sds_df
+            source_name, target_name = "Parental SDS", "Child SDS"
+        else:  # Parental PTD → Child PTD
+            source_df, target_df = ptd_df, sds_df
+            source_name, target_name = "Parental PTD", "Child PTD"
         
-        # Display basic info
+        # Display info
         st.markdown("---")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -612,19 +664,17 @@ def main():
         with col2:
             st.info(f"📊 {target_name} Records: {len(target_df)}")
         with col3:
-            # Count columns excluding ignored ones
-            IGNORE_COLUMNS = ['Definition Last Modified', 'Relationship Last Modified']
+            IGNORE_COLUMNS = {'Definition Last Modified', 'Relationship Last Modified'}
             source_cols = [col for col in source_df.columns if col not in IGNORE_COLUMNS]
             st.info(f"📋 {source_name} Columns: {len(source_cols)}")
         
         st.markdown("---")
         
-        # Get all unique Item Names from both dataframes - using cached function
-        source_items = get_unique_items(source_df, 'Item Name')
-        target_items = get_unique_items(target_df, 'Item Name')
+        # Get unique items
+        source_items = get_unique_items(source_df)
+        target_items = get_unique_items(target_df)
         all_items = sorted(list(source_items.union(target_items)))
         
-        # Show items only in source or only in target
         only_in_source = source_items - target_items
         only_in_target = target_items - source_items
         
@@ -633,108 +683,102 @@ def main():
                 col1, col2 = st.columns(2)
                 with col1:
                     if only_in_source:
-                        st.warning(f"**Only in {source_name} ({len(only_in_source)} items):**")
+                        st.warning(f"**Only in {source_name} ({len(only_in_source)}):**")
                         st.write(list(only_in_source))
                 with col2:
                     if only_in_target:
-                        st.warning(f"**Only in {target_name} ({len(only_in_target)} items):**")
+                        st.warning(f"**Only in {target_name} ({len(only_in_target)}):**")
                         st.write(list(only_in_target))
         
         st.markdown("---")
         
-        # Multi-select item comparison
+        # Item selection
         st.subheader("Select Items to Compare")
         
-        # Quick selection options
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("✅ Select All", use_container_width=True):
                 st.session_state.selected_items = all_items
-        
         with col2:
             if st.button("❌ Clear Selection", use_container_width=True):
                 st.session_state.selected_items = []
-        
         with col3:
             if st.button(f"🔍 Select from {source_name} only", use_container_width=True):
                 st.session_state.selected_items = sorted(list(source_items))
         
-        # Multi-select widget
         selected_items = st.multiselect(
-            "Select Item Names to Compare:",
+            "Select Item Names:",
             options=all_items,
-            default=st.session_state.selected_items,
-            help="You can select multiple items to compare at once"
+            default=st.session_state.selected_items
         )
         
-        # Update session state with current selection
         st.session_state.selected_items = selected_items
         
-        # Show selection count
         if selected_items:
-            st.info(f"📋 Selected {len(selected_items)} item(s) for comparison")
+            st.info(f"📋 Selected {len(selected_items)} item(s)")
         else:
-            st.warning("⚠️ No items selected. Please select at least one item to compare.")
+            st.warning("⚠️ No items selected")
         
         if selected_items and st.button("🔍 Compare Selected Items", type="primary", use_container_width=True):
             all_comparisons = {}
+            
+            # Build lookup dictionaries for faster access
+            with st.spinner("Building lookup indices..."):
+                source_dict = build_lookup_dictionaries(source_df)
+                target_dict = build_lookup_dictionaries(target_df)
+                source_columns = [col for col in source_df.columns if col not in {'Definition Last Modified', 'Relationship Last Modified'}]
             
             # Progress tracking
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Batch processing with progress updates every 50 items
-            batch_size = 50
             total_items = len(selected_items)
+            start_time = time.time()
             
             for idx, item_name in enumerate(selected_items):
-                # Update progress less frequently for better performance
-                if idx % batch_size == 0 or idx == total_items - 1:
+                if idx % 20 == 0 or idx == total_items - 1:
                     status_text.text(f"Comparing {idx+1}/{total_items}: {item_name}")
                     progress_bar.progress((idx + 1) / total_items)
                 
-                source_row, target_row, match_type = find_matching_rows(source_df, target_df, item_name)
+                source_row, target_row, match_type = find_matching_rows_optimized(
+                    source_df, target_df, item_name, source_dict, target_dict
+                )
                 
-                if source_row.empty and target_row.empty:
-                    # Skip warning for performance - can log to list if needed
-                    pass
-                else:
-                    comparison_df = create_comparison_dataframe(source_row, target_row, source_df, source_name, target_name)
+                if source_row is not None or target_row is not None:
+                    comparison_df = create_comparison_dataframe_fast(
+                        source_row, target_row, source_columns, source_name, target_name
+                    )
                     all_comparisons[item_name] = {
                         'comparison_df': comparison_df,
                         'match_type': match_type,
-                        'source_exists': not source_row.empty,
-                        'target_exists': not target_row.empty
+                        'source_exists': source_row is not None,
+                        'target_exists': target_row is not None
                     }
             
-            status_text.text("✅ Comparison complete!")
+            elapsed_time = time.time() - start_time
+            status_text.text(f"✅ Comparison complete! ({elapsed_time:.2f}s)")
             progress_bar.progress(1.0)
             
-            # Store in session state
             st.session_state.all_comparisons = all_comparisons
             st.session_state.comparison_complete = True
             st.session_state.source_name = source_name
             st.session_state.target_name = target_name
-            st.session_state.source_df = source_df  # Store source dataframe for report generation
+            st.session_state.source_df = source_df
             
-            st.success(f"✅ Completed comparison for {len(all_comparisons)} items!")
+            st.success(f"✅ Completed comparison for {len(all_comparisons)} items in {elapsed_time:.2f}s!")
             
             st.markdown("---")
             
-            # Display summary for selected items
+            # Summary
             st.subheader("📊 Comparison Summary")
             
             summary_data = []
             for item_name, data in all_comparisons.items():
                 comp_df = data['comparison_df']
+                match_counts = comp_df['Match'].value_counts()
                 
-                # Vectorized counting
-                match_mask = comp_df['Match'] == 'match'
                 total_cols = len(comp_df)
-                matches = match_mask.sum()
-                mismatches = (comp_df['Match'] == 'mismatch').sum()
-                missing_target = (comp_df['Match'] == 'missing_target').sum()
-                missing_source = (comp_df['Match'] == 'missing_source').sum()
+                matches = match_counts.get('match', 0)
                 match_percentage = (matches / total_cols * 100) if total_cols > 0 else 0
                 
                 summary_data.append({
@@ -744,16 +788,16 @@ def main():
                     f'In {target_name}': '✓' if data['target_exists'] else '✗',
                     'Total Columns': total_cols,
                     'Matches ✅': matches,
-                    'Mismatches ❌': mismatches,
-                    f'Missing in {target_name} ⚠️': missing_target,
-                    f'Missing in {source_name} ⚠️': missing_source,
+                    'Mismatches ❌': match_counts.get('mismatch', 0),
+                    f'Missing in {target_name} ⚠️': match_counts.get('missing_target', 0),
+                    f'Missing in {source_name} ⚠️': match_counts.get('missing_source', 0),
                     'Match %': f"{match_percentage:.1f}%"
                 })
             
             summary_df = pd.DataFrame(summary_data)
             st.dataframe(summary_df, use_container_width=True, height=300)
             
-            # Filter out items with 100% match rate for detailed results
+            # Filter for display
             items_to_display = {}
             items_with_100_match = []
             
@@ -767,70 +811,58 @@ def main():
                 else:
                     items_to_display[item_name] = data
             
-            # Display individual comparisons (excluding 100% matches)
-            st.subheader("📋 Detailed Comparison Results")
+            st.subheader("📋 Detailed Results")
             
-            # Show info about hidden items
             if items_with_100_match:
-                st.success(f"✅ {len(items_with_100_match)} item(s) with 100% match are hidden from detailed view")
+                st.success(f"✅ {len(items_with_100_match)} item(s) with 100% match hidden")
                 with st.expander(f"View {len(items_with_100_match)} items with 100% match"):
                     st.write(items_with_100_match)
             
-            if len(items_to_display) == 0:
-                st.info("🎉 All items have 100% match rate! No discrepancies to display.")
+            if not items_to_display:
+                st.info("🎉 All items have 100% match!")
             else:
                 st.info(f"Showing {len(items_to_display)} item(s) with discrepancies")
                 
-                # Limit tabs to first 20 items for performance
                 if len(items_to_display) > 20:
-                    st.warning(f"⚠️ Displaying first 20 items in tabs. Download the report to see all {len(items_to_display)} items with discrepancies.")
+                    st.warning(f"⚠️ Displaying first 20 items. Download report for all {len(items_to_display)} items.")
                     items_to_show = dict(list(items_to_display.items())[:20])
                 else:
                     items_to_show = items_to_display
                 
-                # Tab selection for each item (excluding 100% matches)
                 tabs = st.tabs([item_name for item_name in items_to_show.keys()])
                 
                 for tab, (item_name, data) in zip(tabs, items_to_show.items()):
                     with tab:
                         comparison_df = data['comparison_df']
+                        match_counts = comparison_df['Match'].value_counts()
                         
-                        # Show match information
                         col1, col2 = st.columns(2)
                         with col1:
                             if data['match_type']:
                                 st.success(f"✅ Matched by: **{data['match_type']}**")
                             st.info(f"In {source_name}: {'✓' if data['source_exists'] else '✗'}")
                         with col2:
-                            matches = (comparison_df['Match'] == 'match').sum()
+                            matches = match_counts.get('match', 0)
                             match_rate = (matches/len(comparison_df)*100)
                             st.metric("Match Rate", f"{match_rate:.1f}%")
                             st.info(f"In {target_name}: {'✓' if data['target_exists'] else '✗'}")
                         
-                        # Summary counts for this item
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
-                            total_rows = len(comparison_df)
-                            st.metric("Total Rows", total_rows)
+                            st.metric("Total Rows", len(comparison_df))
                         with col2:
-                            match_count = (comparison_df['Match'] == 'match').sum()
-                            st.metric("✅ Matches", match_count)
+                            st.metric("✅ Matches", match_counts.get('match', 0))
                         with col3:
-                            mismatch_count = (comparison_df['Match'] == 'mismatch').sum()
-                            st.metric("❌ Mismatches", mismatch_count)
+                            st.metric("❌ Mismatches", match_counts.get('mismatch', 0))
                         with col4:
-                            missing_count = ((comparison_df['Match'] == 'missing_source') | 
-                                           (comparison_df['Match'] == 'missing_target')).sum()
-                            st.metric("⚠️ Missing", missing_count)
+                            missing = match_counts.get('missing_source', 0) + match_counts.get('missing_target', 0)
+                            st.metric("⚠️ Missing", missing)
                         
                         st.markdown("---")
-                        
-                        # Display full comparison table
                         st.markdown("##### Complete Comparison Table")
                         styled_df = comparison_df.style.apply(highlight_differences, axis=1)
                         st.dataframe(styled_df, use_container_width=True, height=500)
             
-            # Legend
             st.markdown("---")
             st.markdown("**Legend:**")
             col1, col2, col3 = st.columns(3)
@@ -839,24 +871,23 @@ def main():
             with col2:
                 st.markdown("🔴 **Red**: Values differ")
             with col3:
-                st.markdown("🟡 **Orange**: Value missing in one file")
+                st.markdown("🟡 **Orange**: Value missing")
         
-        # Download Report Section (always visible if comparison is complete)
+        # Download report
         if st.session_state.comparison_complete and st.session_state.all_comparisons:
             st.markdown("---")
             st.markdown("---")
-            st.subheader("📥 Download Comprehensive Report")
+            st.subheader("📥 Download Report")
             
             col1, col2 = st.columns([2, 1])
             with col1:
-                st.info("📊 The report includes:\n"
-                       "- **Sheet 1**: Comparison Summary (all items)\n"
-                       "- **Sheet 2**: Issues Only (simplified format with Form Name, Form Label, Form Short Label, Item Group Name, Item Group Label, and Issue Type)")
+                st.info("📊 Report includes:\n"
+                       "- **Sheet 1**: Comparison Summary\n"
+                       "- **Sheet 2**: Issues Only (detailed)")
             
             with col2:
-                # Generate report with progress indicator
-                with st.spinner("Generating Excel report..."):
-                    report_output = create_comprehensive_report(
+                with st.spinner("Generating report..."):
+                    report_output = create_comprehensive_report_fast(
                         st.session_state.all_comparisons,
                         st.session_state.source_name,
                         st.session_state.target_name,
@@ -866,18 +897,18 @@ def main():
                 st.download_button(
                     label="📥 Download Report",
                     data=report_output,
-                    file_name=f"comparison_report_{st.session_state.source_name}_vs_{st.session_state.target_name}.xlsx",
+                    file_name=f"comparison_{st.session_state.source_name}_vs_{st.session_state.target_name}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     type="primary"
                 )
     
     elif not has_left and not has_right:
-        st.warning(f"⚠️ Please {'paste' if input_method == '📋 Copy-Paste from Excel' else 'upload'} both {left_label} and {right_label} data to start comparing.")
+        st.warning(f"⚠️ Please provide both {left_label} and {right_label} data.")
     elif not has_left:
-        st.warning(f"⚠️ Please {'paste' if input_method == '📋 Copy-Paste from Excel' else 'upload'} {left_label} data.")
+        st.warning(f"⚠️ Please provide {left_label} data.")
     else:
-        st.warning(f"⚠️ Please {'paste' if input_method == '📋 Copy-Paste from Excel' else 'upload'} {right_label} data.")
+        st.warning(f"⚠️ Please provide {right_label} data.")
 
 if __name__ == "__main__":
     main()
