@@ -101,7 +101,7 @@ def convert_decimal_column(df):
         if pd.isna(value) or value == '' or value is None:
             return value
         try:
-            str_value  = str(value).strip()
+            str_value   = str(value).strip()
             if not str_value:
                 return value
             float_value = float(str_value)
@@ -131,7 +131,7 @@ def process_choice_code_sheet(df, sheet_type="Codelist"):
 def process_ptd_dataframe(df):
     if df is None:
         return None, 0, 0
-    original_count = len(df)
+    original_count     = len(df)
     trial_column_names = [
         'Used in trial (Y, N, Mod)',
         'Used in trial (Y, N, Mod) ',
@@ -183,9 +183,8 @@ def build_lookup_dictionaries(df):
             item_name_counts[key] = item_name_counts.get(key, 0) + 1
 
     duplicate_item_names = {k for k, v in item_name_counts.items() if v > 1}
-
-    simple_dict    = {}
-    composite_dict = {}
+    simple_dict          = {}
+    composite_dict       = {}
 
     for _, row in df.iterrows():
         item_name = row.get('Item Name')
@@ -197,7 +196,7 @@ def build_lookup_dictionaries(df):
         else:
             form_label       = row.get('Form Label', '')
             item_group_label = row.get('Item Group Label', '')
-            comp_key = make_composite_key(item_name_s, form_label, item_group_label)
+            comp_key         = make_composite_key(item_name_s, form_label, item_group_label)
             composite_dict[comp_key] = row
 
     return simple_dict, composite_dict, duplicate_item_names
@@ -387,10 +386,10 @@ def compare_codelists(
 
     status = 'match' if mismatches == 0 else 'mismatch'
     return {
-        'status': status,
-        'message': f"{list_type} '{codelist_name}': {matches} matches, {mismatches} mismatches",
-        'matches': matches, 'mismatches': mismatches,
-        'details': details, 'type': list_type
+        'status':     status,
+        'message':    f"{list_type} '{codelist_name}': {matches} matches, {mismatches} mismatches",
+        'matches':    matches, 'mismatches': mismatches,
+        'details':    details, 'type': list_type
     }
 
 
@@ -515,7 +514,6 @@ def compute_statistics(all_comparisons, missing_in_source, missing_in_target,
     total_missing          = 0
     total_columns_compared = 0
     total_matched_columns  = 0
-    issue_category_counts  = {}
     form_label_stats       = {}
 
     for tab_label, data in all_comparisons.items():
@@ -535,17 +533,6 @@ def compute_statistics(all_comparisons, missing_in_source, missing_in_target,
         if mc.get('missing_source', 0) + mc.get('missing_target', 0) > 0:
             total_missing += 1
 
-        issue_rows = comp_df[comp_df['Match'] != 'match']
-        for _, row in issue_rows.iterrows():
-            col_name     = row['Column Name']
-            src_val      = row[f'{source_name} Value']
-            tgt_val      = row[f'{target_name} Value']
-            match_status = row['Match']
-            cat, _, _    = parse_issue_fields(
-                match_status, col_name, src_val, tgt_val, source_name, target_name
-            )
-            issue_category_counts[cat] = issue_category_counts.get(cat, 0) + 1
-
         form_label = data.get('form_label', '') or 'No Form Label'
         if form_label not in form_label_stats:
             form_label_stats[form_label] = {'total': 0, 'match_100': 0, 'with_issues': 0}
@@ -554,13 +541,6 @@ def compute_statistics(all_comparisons, missing_in_source, missing_in_target,
             form_label_stats[form_label]['match_100'] += 1
         else:
             form_label_stats[form_label]['with_issues'] += 1
-
-    for _ in missing_in_target:
-        cat = f'Item Not Found in {target_name}'
-        issue_category_counts[cat] = issue_category_counts.get(cat, 0) + 1
-    for _ in missing_in_source:
-        cat = f'Item Not Found in {source_name}'
-        issue_category_counts[cat] = issue_category_counts.get(cat, 0) + 1
 
     return {
         'total_compared':         total_compared,
@@ -575,113 +555,59 @@ def compute_statistics(all_comparisons, missing_in_source, missing_in_target,
         'total_matched_columns':  total_matched_columns,
         'overall_match_pct':      (total_matched_columns / total_columns_compared * 100
                                    if total_columns_compared > 0 else 0),
-        'issue_category_counts':  issue_category_counts,
         'form_label_stats':       form_label_stats,
     }
 
 
 def render_statistics(stats, source_name, target_name):
+    """
+    Renders only:
+    - Overview metric cards
+    - Missing items metric cards
+    - Column-level metric cards
+    - Breakdown by Form Label table
+
+    Removed:
+    - Items: Match Status Distribution (pie chart)
+    - Issue Category Breakdown (bar chart)
+    - Items by Form Label (stacked bar chart)
+    """
     st.markdown("---")
     st.subheader("📈 Comparison Statistics")
 
+    # ── Row 1: Overview metrics ────────────────────────────────────────
     st.markdown("##### 📊 Overview")
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Total Items Compared",      stats['total_compared'])
-    m2.metric("✅ 100% Match",             stats['total_100pct'],
-              delta=f"{(stats['total_100pct']/stats['total_compared']*100):.1f}%"
-              if stats['total_compared'] > 0 else "0%")
-    m3.metric("⚠️ Items with Issues",      stats['total_with_issues'],  delta_color="inverse")
-    m4.metric("🔴 Items with Mismatches",  stats['total_mismatches'],   delta_color="inverse")
-    m5.metric("🟡 Items with Missing",     stats['total_missing'],      delta_color="inverse")
-    m6.metric("Overall Match %",           f"{stats['overall_match_pct']:.1f}%")
+    m1.metric("Total Items Compared",     stats['total_compared'])
+    m2.metric(
+        "✅ 100% Match",
+        stats['total_100pct'],
+        delta=f"{(stats['total_100pct'] / stats['total_compared'] * 100):.1f}%"
+        if stats['total_compared'] > 0 else "0%"
+    )
+    m3.metric("⚠️ Items with Issues",     stats['total_with_issues'],  delta_color="inverse")
+    m4.metric("🔴 Items with Mismatches", stats['total_mismatches'],   delta_color="inverse")
+    m5.metric("🟡 Items with Missing",    stats['total_missing'],      delta_color="inverse")
+    m6.metric("Overall Match %",          f"{stats['overall_match_pct']:.1f}%")
 
+    # ── Row 2: Missing items metrics ───────────────────────────────────
     st.markdown("##### 🔍 Missing Items")
     n1, n2, n3 = st.columns(3)
     n1.metric("Total Missing Items",          stats['total_missing_items'])
     n2.metric(f"Not Found in {target_name}",  stats['missing_in_target'],  delta_color="inverse")
     n3.metric(f"Not Found in {source_name}",  stats['missing_in_source'],  delta_color="inverse")
 
+    # ── Row 3: Column-level metrics ────────────────────────────────────
     st.markdown("##### 📋 Column-Level Statistics")
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Columns Compared",  stats['total_columns_compared'])
     c2.metric("Total Matched Columns",   stats['total_matched_columns'])
-    c3.metric("Total Unmatched Columns",
-              stats['total_columns_compared'] - stats['total_matched_columns'])
+    c3.metric(
+        "Total Unmatched Columns",
+        stats['total_columns_compared'] - stats['total_matched_columns']
+    )
 
-    st.markdown("---")
-    st.markdown("##### 📉 Visual Breakdown")
-    chart1, chart2 = st.columns(2)
-
-    with chart1:
-        st.markdown("###### Items: Match Status Distribution")
-        fig_pie = go.Figure(data=[go.Pie(
-            labels=['100% Match', 'Has Issues', 'Missing Items'],
-            values=[stats['total_100pct'],
-                    stats['total_with_issues'],
-                    stats['total_missing_items']],
-            marker=dict(colors=['#90EE90', '#FFB6C1', '#FFE4B5']),
-            hole=0.4,
-            textinfo='label+percent+value',
-            hovertemplate='%{label}: %{value} items (%{percent})<extra></extra>'
-        )])
-        fig_pie.update_layout(showlegend=True, height=400,
-                              margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with chart2:
-        st.markdown("###### Issue Category Breakdown")
-        if stats['issue_category_counts']:
-            cat_df = pd.DataFrame(
-                list(stats['issue_category_counts'].items()),
-                columns=['Issue Category', 'Count']
-            ).sort_values('Count', ascending=True)
-
-            fig_bar = px.bar(
-                cat_df, x='Count', y='Issue Category', orientation='h',
-                color='Count',
-                color_continuous_scale=[[0, '#FFE4B5'], [0.5, '#FFB6C1'], [1, '#FF6B6B']],
-                text='Count'
-            )
-            fig_bar.update_traces(textposition='outside')
-            fig_bar.update_layout(
-                height=400, margin=dict(t=10, b=10, l=10, r=10),
-                coloraxis_showscale=False,
-                xaxis_title='Number of Issues', yaxis_title=''
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            st.success("🎉 No issues found!")
-
-    st.markdown("---")
-    st.markdown("###### Items by Form Label")
-    if stats['form_label_stats']:
-        form_rows = []
-        for fl, counts in stats['form_label_stats'].items():
-            form_rows.append({
-                'Form Label': fl,
-                '100% Match': counts['match_100'],
-                'Has Issues': counts['with_issues'],
-            })
-        form_df      = pd.DataFrame(form_rows).sort_values('Has Issues', ascending=False)
-        chart_height = max(500, len(form_df) * 45 + 120)
-
-        fig_form = px.bar(
-            form_df, x='Form Label', y=['100% Match', 'Has Issues'],
-            barmode='stack',
-            color_discrete_map={'100% Match': '#90EE90', 'Has Issues': '#FFB6C1'},
-            text_auto=True
-        )
-        fig_form.update_layout(
-            height=chart_height,
-            margin=dict(t=30, b=120, l=10, r=10),
-            xaxis_title='Form Label', yaxis_title='Number of Items',
-            legend_title='Status', xaxis_tickangle=-35, font=dict(size=13),
-            legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                        xanchor='right', x=1)
-        )
-        fig_form.update_traces(textfont_size=13, textposition='inside')
-        st.plotly_chart(fig_form, use_container_width=True)
-
+    # ── Row 4: Breakdown by Form Label table ───────────────────────────
     st.markdown("---")
     st.markdown("##### 📋 Breakdown by Form Label")
     if stats['form_label_stats']:
@@ -698,7 +624,8 @@ def render_statistics(stats, source_name, target_name):
             })
         st.dataframe(
             pd.DataFrame(form_detail_rows).sort_values('Has Issues', ascending=False),
-            use_container_width=True, hide_index=True
+            use_container_width=True,
+            hide_index=True
         )
 
 
@@ -725,13 +652,13 @@ def create_comprehensive_report(
 
         cl_status = 'N/A'
         if data.get('codelist_comparison'):
-            cl = data['codelist_comparison']
+            cl        = data['codelist_comparison']
             cl_status = (f"✓ {cl['matches']} matches" if cl['status'] == 'match'
                          else f"✗ {cl['mismatches']} issues")
 
         ucl_status = 'N/A'
         if data.get('unit_codelist_comparison'):
-            ucl = data['unit_codelist_comparison']
+            ucl        = data['unit_codelist_comparison']
             ucl_status = (f"✓ {ucl['matches']} matches" if ucl['status'] == 'match'
                           else f"✗ {ucl['mismatches']} issues")
 
@@ -798,7 +725,7 @@ def create_comprehensive_report(
             'Total Columns', 'Matches', 'Codelist Status', 'Unit Codelist Status', 'Match %',
         ]]
         summary_df.to_excel(writer, sheet_name='Comparison Summary', index=False)
-        ws_summary = writer.book['Comparison Summary']
+        ws_summary     = writer.book['Comparison Summary']
         _autofit_sheet(ws_summary)
         status_col_idx = summary_df.columns.get_loc('Status') + 1
         for row_idx in range(2, ws_summary.max_row + 1):
@@ -835,27 +762,24 @@ def _autofit_sheet(worksheet):
 
 def _init_session_state():
     defaults = {
-        'selected_items':          [],
-        'ptd_df':                  None,
-        'sds_df':                  None,
-        'ptd_codelists_df':        None,
-        'sds_codelists_df':        None,
-        'ptd_unit_codelists_df':   None,
-        'sds_unit_codelists_df':   None,
-        'comparison_direction':    "PTD → SDS (Compare PTD columns against SDS)",
-        'all_comparisons':         None,
-        'comparison_complete':     False,
-        'report_output':           None,
-        'missing_in_source':       [],
-        'missing_in_target':       [],
-        'source_name':             '',
-        'target_name':             '',
-        'source_df':               None,
-        # ── file identity tracking ─────────────────────────────────────
-        # Store file name+size as a lightweight fingerprint.
-        # _clear_comparison_state only fires when the fingerprint changes.
-        'left_file_id':            None,
-        'right_file_id':           None,
+        'selected_items':        [],
+        'ptd_df':                None,
+        'sds_df':                None,
+        'ptd_codelists_df':      None,
+        'sds_codelists_df':      None,
+        'ptd_unit_codelists_df': None,
+        'sds_unit_codelists_df': None,
+        'comparison_direction':  "PTD → SDS (Compare PTD columns against SDS)",
+        'all_comparisons':       None,
+        'comparison_complete':   False,
+        'report_output':         None,
+        'missing_in_source':     [],
+        'missing_in_target':     [],
+        'source_name':           '',
+        'target_name':           '',
+        'source_df':             None,
+        'left_file_id':          None,
+        'right_file_id':         None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -863,21 +787,19 @@ def _init_session_state():
 
 
 def _file_id(uploaded_file):
-    """Return a lightweight fingerprint for an uploaded file."""
     if uploaded_file is None:
         return None
     return (uploaded_file.name, uploaded_file.size)
 
 
 def _clear_comparison_state():
-    """Reset only comparison results — NOT file data or selections."""
     st.session_state.all_comparisons     = None
     st.session_state.comparison_complete = False
     st.session_state.report_output       = None
 
 
 # ─────────────────────────────────────────────
-# FILE LOADER HELPER
+# FILE LOADER
 # ─────────────────────────────────────────────
 
 def _load_file_data(uploaded_file, label, is_ptd):
@@ -929,13 +851,11 @@ def main():
     st.title("📊 PTD vs SDS Comparison Tool")
     _init_session_state()
 
-    # ── Input method ──────────────────────────
     st.markdown("---")
     st.subheader("📥 Select Input Method")
     st.radio("How would you like to provide the data?",
              ["📁 Upload Excel Files"], horizontal=True)
 
-    # ── Comparison direction ──────────────────
     st.markdown("---")
     direction_options = [
         "PTD → SDS (Compare PTD columns against SDS)",
@@ -948,7 +868,6 @@ def main():
         direction_options,
         index=direction_options.index(st.session_state.comparison_direction)
     )
-    # Only clear results if direction actually changed
     if comparison_direction != st.session_state.comparison_direction:
         st.session_state.comparison_direction = comparison_direction
         _clear_comparison_state()
@@ -994,24 +913,20 @@ def main():
     )
     st.markdown("---")
 
-    # ── File uploaders ────────────────────────
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader(f"📄 {left_label} File")
-        left_file = st.file_uploader(
+        left_file    = st.file_uploader(
             f"Upload {left_label} Excel file:",
             type=['xlsx', 'xls'], key=f"{left_key}_upload"
         )
-        new_left_id = _file_id(left_file)
-        # Only reload + clear if a DIFFERENT file was uploaded
+        new_left_id  = _file_id(left_file)
         if left_file is not None and new_left_id != st.session_state.left_file_id:
             st.session_state.left_file_id = new_left_id
             _clear_comparison_state()
             with st.spinner(f"Reading {left_label} file..."):
-                form_df, cl_df, ucl_df = _load_file_data(
-                    left_file, left_label, is_left_ptd
-                )
+                form_df, cl_df, ucl_df = _load_file_data(left_file, left_label, is_left_ptd)
             st.session_state.ptd_df                = form_df
             st.session_state.ptd_codelists_df      = cl_df
             st.session_state.ptd_unit_codelists_df = ucl_df
@@ -1020,19 +935,16 @@ def main():
 
     with col2:
         st.subheader(f"📄 {right_label} File")
-        right_file = st.file_uploader(
+        right_file   = st.file_uploader(
             f"Upload {right_label} Excel file:",
             type=['xlsx', 'xls'], key=f"{right_key}_upload"
         )
         new_right_id = _file_id(right_file)
-        # Only reload + clear if a DIFFERENT file was uploaded
         if right_file is not None and new_right_id != st.session_state.right_file_id:
             st.session_state.right_file_id = new_right_id
             _clear_comparison_state()
             with st.spinner(f"Reading {right_label} file..."):
-                form_df, cl_df, ucl_df = _load_file_data(
-                    right_file, right_label, is_right_ptd
-                )
+                form_df, cl_df, ucl_df = _load_file_data(right_file, right_label, is_right_ptd)
             st.session_state.sds_df                = form_df
             st.session_state.sds_codelists_df      = cl_df
             st.session_state.sds_unit_codelists_df = ucl_df
@@ -1126,7 +1038,7 @@ def main():
         with st.expander(
             f"⚠️ Items Not Found in Both Files "
             f"({len(only_in_source) + len(only_in_target)} total)",
-            expanded=False               # ← collapsed by default to avoid rerun issues
+            expanded=False
         ):
             st.info("ℹ️ These items are **excluded from the comparison tabs** below. "
                     "They will appear in the **Issues Only** sheet of the downloaded report.")
@@ -1136,8 +1048,10 @@ def main():
                     st.warning(f"**Only in {source_name} — not found in {target_name} "
                                f"({len(only_in_source)}):**")
                     st.dataframe(
-                        pd.DataFrame({'Item Name': only_in_source,
-                                      'Status': [f'Not found in {target_name}'] * len(only_in_source)}),
+                        pd.DataFrame({
+                            'Item Name': only_in_source,
+                            'Status': [f'Not found in {target_name}'] * len(only_in_source)
+                        }),
                         use_container_width=True, hide_index=True
                     )
             with ec2:
@@ -1145,8 +1059,10 @@ def main():
                     st.warning(f"**Only in {target_name} — not found in {source_name} "
                                f"({len(only_in_target)}):**")
                     st.dataframe(
-                        pd.DataFrame({'Item Name': only_in_target,
-                                      'Status': [f'Not found in {source_name}'] * len(only_in_target)}),
+                        pd.DataFrame({
+                            'Item Name': only_in_target,
+                            'Status': [f'Not found in {source_name}'] * len(only_in_target)
+                        }),
                         use_container_width=True, hide_index=True
                     )
 
@@ -1167,8 +1083,6 @@ def main():
         "Duplicate Item Names shown as 'Item Name (Form Label)'."
     )
 
-    # ── Selection buttons — NO st.rerun() ────────────────────────────
-    # Instead of rerunning, we set a flag and read it immediately below.
     sc1, sc2, sc3 = st.columns(3)
     with sc1:
         if st.button("✅ Select All", use_container_width=True):
@@ -1180,16 +1094,13 @@ def main():
         if st.button(f"🔍 Select from {source_name} only", use_container_width=True):
             st.session_state.selected_items = all_tab_labels
 
-    # Validate stored selection against current option list
-    valid_default = [l for l in st.session_state.selected_items if l in all_tab_labels]
-
+    valid_default   = [l for l in st.session_state.selected_items if l in all_tab_labels]
     selected_labels = st.multiselect(
         "Select Item Names:",
         options=all_tab_labels,
         default=valid_default,
         key='multiselect_items'
     )
-    # Sync back without triggering a rerun
     st.session_state.selected_items = selected_labels
 
     if selected_labels:
@@ -1197,7 +1108,6 @@ def main():
     else:
         st.warning("⚠️ No items selected")
 
-    # ── Compare button ────────────────────────────────────────────────
     if selected_labels and st.button(
         "🔍 Compare Selected Items", type="primary", use_container_width=True
     ):
@@ -1281,7 +1191,6 @@ def main():
         status_text.text(f"✅ Comparison complete! ({elapsed:.2f}s)")
         progress_bar.progress(1.0)
 
-        # ── Persist everything in session state ───────────────────────
         st.session_state.all_comparisons     = all_comparisons
         st.session_state.comparison_complete = True
         st.session_state.source_name         = source_name
@@ -1296,7 +1205,6 @@ def main():
         )
 
     # ── Results — always rendered from session state ──────────────────
-    # This block runs on EVERY rerun as long as results exist in state.
     if st.session_state.comparison_complete and st.session_state.all_comparisons:
 
         all_comparisons = st.session_state.all_comparisons
@@ -1316,7 +1224,7 @@ def main():
 
             cl_info = "N/A"
             if data.get('codelist_comparison'):
-                cl = data['codelist_comparison']
+                cl      = data['codelist_comparison']
                 cl_info = (f"✓ {cl['matches']} matches" if cl['status'] == 'match'
                            else (cl['message'] if cl['status'] in
                                  ('missing_source', 'missing_target', 'not_found')
@@ -1324,7 +1232,7 @@ def main():
 
             ucl_info = "N/A"
             if data.get('unit_codelist_comparison'):
-                ucl = data['unit_codelist_comparison']
+                ucl      = data['unit_codelist_comparison']
                 ucl_info = (f"✓ {ucl['matches']} matches" if ucl['status'] == 'match'
                             else (ucl['message'] if ucl['status'] in
                                   ('missing_source', 'missing_target', 'not_found')
@@ -1347,7 +1255,7 @@ def main():
         st.dataframe(pd.DataFrame(summary_rows),
                      use_container_width=True, height=300)
 
-        # ── Statistics ─────────────────────────────────────────────────
+        # ── Statistics (metrics + form label table only) ───────────────
         stats = compute_statistics(
             all_comparisons,
             st.session_state.missing_in_source,
@@ -1436,7 +1344,6 @@ def main():
         lc3.markdown("🟡 **Orange**: Value missing")
         lc4.markdown("📋 **Codelist/Unit CL rows**: Choice Code comparisons")
 
-        # ── Download ───────────────────────────────────────────────────
         st.markdown("---")
         st.subheader("📥 Download Report")
         dc1, dc2 = st.columns([2, 1])
